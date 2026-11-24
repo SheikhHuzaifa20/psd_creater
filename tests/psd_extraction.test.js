@@ -59,3 +59,19 @@ test('document background preserves luminosity and opacity, while outlined shape
   assert.ok(data.layers[2].shapeStyle.strokeWidth>0);
  }finally{fs.rmSync(dir,{recursive:true,force:true});}
 });
+
+test('vector fills and opaque layer order are respected instead of showing raw mask colors',async()=>{
+ const mask=createCanvas(200,200);mask.getContext('2d').fillStyle='#000';mask.getContext('2d').fillRect(0,0,200,200);
+ const hidden=createCanvas(30,30);hidden.getContext('2d').fillStyle='#f00';hidden.getContext('2d').fillRect(0,0,30,30);
+ const cover=createCanvas(100,100);cover.getContext('2d').fillStyle='#000';cover.getContext('2d').fillRect(0,0,100,100);
+ const {dir,data}=extract({width:200,height:200,children:[
+  {name:'Color Fill 1',left:0,top:0,right:200,bottom:200,canvas:mask,vectorFill:{type:'color',color:{r:255,g:255,b:255}}},
+  {name:'Covered logo',left:50,top:50,right:80,bottom:80,canvas:hidden},
+  {name:'Rectangle cover',left:30,top:30,right:130,bottom:130,canvas:cover,vectorFill:{type:'color',color:{r:255,g:255,b:255}}},
+ ]});
+ try{
+  const image=await loadImage(path.join(dir,'out',data.backgroundPath));const c=createCanvas(200,200);c.getContext('2d').drawImage(image,0,0);
+  assert.equal(c.getContext('2d').getImageData(5,5,1,1).data[0],255,'Vector white fill was exported as a black mask');
+  assert.equal(data.layers.find(l=>l.name==='Covered logo').occluded,true,'Covered artwork became visible');
+ }finally{fs.rmSync(dir,{recursive:true,force:true});}
+});

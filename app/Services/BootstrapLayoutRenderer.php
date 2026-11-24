@@ -2,7 +2,7 @@
 
 namespace App\Services;
 
-/** Converts PSD geometry to Bootstrap sections with CSS Grid inside each row. */
+/** Builds Bootstrap content regions while preserving PSD visibility and component boundaries. */
 class BootstrapLayoutRenderer
 {
     private function escape(mixed $value): string
@@ -14,10 +14,18 @@ class BootstrapLayoutRenderer
     {
         $result = [];
         foreach ($layers as $layer) {
-            if (! empty($layer['hidden'])) {
+            if (! empty($layer['hidden']) || ! empty($layer['occluded'])) {
                 continue;
             }
             if (($layer['type'] ?? '') === 'group') {
+                $flatChildren = $this->leaves($layer['children'] ?? []);
+                $colonCount = count(array_filter($flatChildren, fn ($child) => trim($child['text'] ?? '') === ':'));
+                $numbers = array_filter($flatChildren, fn ($child) => isset($child['text']) && preg_match('/^\d{1,3}$/', trim($child['text'])));
+                if ($colonCount >= 2 && count($numbers) >= 3) {
+                    $result[] = $this->bounds($flatChildren) + ['kind' => 'countdown', 'children' => $flatChildren, 'order' => count($result), 'name' => $layer['name'] ?? 'Countdown'];
+
+                    continue;
+                }
                 $texts = array_values(array_filter($layer['children'] ?? [], fn ($child) => isset($child['text']) && trim($child['text']) !== ''));
                 $questions = array_values(array_filter($texts, fn ($child) => preg_match('/\?\s*$/u', $child['text'])));
                 if (count($texts) === 2 && count($questions) === 1) {
@@ -128,6 +136,8 @@ class BootstrapLayoutRenderer
 
     private string $primaryRole = 'banner';
 
+    private ?int $mainHeadingId = null;
+
     private function overlap(array $a, array $b): float
     {
         $area = max(0, min($a['right'], $b['right']) - max($a['left'], $b['left'])) * max(0, min($a['bottom'], $b['bottom']) - max($a['top'], $b['top']));
@@ -153,6 +163,9 @@ class BootstrapLayoutRenderer
     private function fieldName(string $text): ?string
     {
         $text = strtolower(trim($text));
+        if (preg_match('/[\r\n@]|\d{4,}/u', $text)) {
+            return null;
+        }
         if (! preg_match('/^(?:your |enter |first name|last name|name\b|e-?mail\b|phone\b|subject\b|message\b|start writing)/', $text)) {
             return null;
         }
@@ -168,7 +181,7 @@ class BootstrapLayoutRenderer
 
     private function isAction(array $item): bool
     {
-        return isset($item['text']) && $this->fontSize($item) < 40 && (bool) preg_match('/^(?:send|submit|learn more|read more|view more|buy|books$|contact$|call|live chat|consult|use coupon|book an appointment)/i', trim($item['text']));
+        return isset($item['text']) && $this->fontSize($item) < 40 && (bool) preg_match('/^(?:send|submit|learn more|read more|view more|buy|books$|contact$|call|live chat|consult|use coupon|book an appointment|toll free)/i', trim($item['text']));
     }
 
     private function controls(array $items): array
@@ -188,6 +201,15 @@ class BootstrapLayoutRenderer
             if ($candidates) {
                 $shape = $candidates[0];
                 $used[$shape['_id']] = true;
+                if (! $field) {
+                    foreach ($items as $icon) {
+                        if (! isset($icon['text']) && empty($icon['shapeStyle']) && ! empty($icon['imagePath']) && $icon['width'] < 80 && $icon['height'] < 80 && $this->contains($shape, $icon)) {
+                            $item['buttonIcon'] = $icon['imagePath'];
+                            $used[$icon['_id']] = true;
+                            break;
+                        }
+                    }
+                }
                 $item = array_replace($item, array_intersect_key($shape, array_flip(['left', 'top', 'right', 'bottom', 'width', 'height', 'shapeStyle'])));
             }
             $item['kind'] = $field ? 'control' : 'button';
@@ -197,17 +219,21 @@ class BootstrapLayoutRenderer
         }
         // Some PSDs draw form boxes without any placeholder text. Recognize them inside contact sections.
         foreach ($items as $title) {
-            if (! isset($title['text']) || ! preg_match('/^(?:contact us|write us a message|schedule a meeting)$/i', trim($title['text']))) {
+            if (! isset($title['text']) || ! preg_match('/^(?:contact us|write us a message|(?:authors editing hub\s*)?schedule a meeting)$/i', trim($title['text']))) {
                 continue;
             }
-            $boxes = array_values(array_filter($items, fn ($box) => ! isset($used[$box['_id']]) && isset($box['shapeStyle']) && $box['top'] > $title['bottom'] && $box['top'] < $title['bottom'] + 700 && $box['left'] >= $title['left'] - 40 && $box['right'] <= $title['left'] + $this->designWidth * .48 && $box['width'] >= 150 && $box['height'] >= 35 && $box['height'] <= 300));
+            $panels = array_values(array_filter($items, fn ($panel) => isset($panel['shapeStyle']) && $panel['width'] > 300 && $panel['height'] > 180 && $this->contains($panel, $title)));
+            usort($panels, fn ($a, $b) => $a['width'] * $a['height'] <=> $b['width'] * $b['height']);
+            $formLeft = $panels[0]['left'] ?? ($title['left'] - 40);
+            $formRight = $panels[0]['right'] ?? ($title['left'] + $this->designWidth * .48);
+            $boxes = array_values(array_filter($items, fn ($box) => ! isset($used[$box['_id']]) && isset($box['shapeStyle']) && $box['top'] > $title['bottom'] && $box['top'] < $title['bottom'] + 700 && $box['left'] >= $formLeft && $box['right'] <= $formRight && $box['width'] >= 150 && $box['height'] >= 35 && $box['height'] <= 300));
             usort($boxes, fn ($a, $b) => ($a['top'] <=> $b['top']) ?: ($a['left'] <=> $b['left']));
             $knownFields = count(array_filter($result, fn ($field) => ($field['kind'] ?? '') === 'control' && $field['top'] > $title['bottom'] && $field['top'] < $title['bottom'] + 700));
             if (count($boxes) < 2 && ! $knownFields) {
                 continue;
             }
             foreach ($boxes as $index => $box) {
-                $field = $box['height'] > 130 ? 'message' : (['name', 'email', 'subject', 'phone'][$index] ?? 'field_'.($index + 1));
+                $field = $box['height'] > 130 ? 'message' : ((preg_match('/schedule/i', $title['text']) ? ['name', 'email', 'phone', 'subject'] : ['name', 'email', 'subject', 'phone'])[$index] ?? 'field_'.($index + 1));
                 $box['kind'] = 'control';
                 $box['field'] = $field;
                 $box['text'] = ucfirst(str_replace('_', ' ', $field));
@@ -219,6 +245,28 @@ class BootstrapLayoutRenderer
         }
 
         return array_merge(array_values(array_filter($items, fn ($item) => ! isset($used[$item['_id']]))), $result);
+    }
+
+    private function icons(array $items): array
+    {
+        $used = [];
+        $icons = [];
+        foreach ($items as $base) {
+            if (isset($base['text']) || isset($base['kind']) || ! isset($base['shapeStyle']) || $base['width'] > 120 || $base['height'] > 120 || ($base['shapeStyle']['radius'] ?? 0) < min($base['width'], $base['height']) * .4) {
+                continue;
+            }
+            $children = array_values(array_filter($items, fn ($item) => ! isset($used[$item['_id']]) && ! isset($item['text']) && empty($item['shapeStyle']) && ! empty($item['imagePath']) && $this->contains($base, $item)));
+            if (! $children) {
+                continue;
+            }
+            $used[$base['_id']] = true;
+            foreach ($children as $child) {
+                $used[$child['_id']] = true;
+            }
+            $icons[] = $base + ['kind' => 'icon', 'children' => $children];
+        }
+
+        return array_merge(array_values(array_filter($items, fn ($item) => ! isset($used[$item['_id']]))), $icons);
     }
 
     private function figures(array $items): array
@@ -259,16 +307,24 @@ class BootstrapLayoutRenderer
     {
         $used = [];
         $cards = [];
-        $boxes = array_values(array_filter($items, fn ($box) => isset($box['shapeStyle']) && empty($box['kind']) && $box['width'] > 250 && $box['height'] > 180 && $box['width'] < $this->designWidth * .61));
+        $boxes = array_values(array_filter($items, fn ($box) => isset($box['shapeStyle']) && empty($box['kind']) && $box['width'] > 250 && $box['height'] > 180 && $box['width'] < $this->designWidth * .85));
         usort($boxes, fn ($a, $b) => $a['width'] * $a['height'] <=> $b['width'] * $b['height']);
         foreach ($boxes as $box) {
             if (isset($used[$box['_id']])) {
                 continue;
             }
-            $children = array_values(array_filter($items, fn ($item) => $item['_id'] !== $box['_id'] && ! isset($used[$item['_id']]) && $this->contains($box, $item) && (isset($item['text']) || isset($item['kind']) || (! isset($item['shapeStyle']) && $item['width'] < 120))));
+            $children = array_values(array_filter($items, fn ($item) => $item['_id'] !== $box['_id'] && ! isset($used[$item['_id']]) && ($this->contains($box, $item) || ($item['width'] <= $box['width'] * 1.02 && $item['height'] <= $box['height'] * 1.02 && $this->overlap($box, $item) > .97)) && (isset($item['text']) || isset($item['kind']) || ! empty($item['imagePath']))));
             if (count($children) < 2) {
                 continue;
             }
+            if ($box['width'] > $this->designWidth * .61 && ! $this->hasControl($children)) {
+                continue;
+            }
+            $fullArtwork = array_filter($children, fn ($child) => ! isset($child['text']) && ! empty($child['imagePath']) && empty($child['shapeStyle']) && $child['width'] > $box['width'] * .8 && $child['height'] > $box['height'] * .7);
+            if ($fullArtwork) {
+                continue;
+            }
+
             $used[$box['_id']] = true;
             foreach ($children as $child) {
                 $used[$child['_id']] = true;
@@ -282,7 +338,7 @@ class BootstrapLayoutRenderer
     private function role(string $text): ?string
     {
         $text = preg_replace('/\s+/u', ' ', trim($text));
-        foreach (['about-author' => '/^(?:about(?: the author| us)?|meet (?:the author|our team))$/i', 'books' => '/^(?:books(?: i.ve written)?|publications|my book|our books)$/iu', 'blogs' => '/^(?:blogs?|latest news|articles)$/i', 'testimonials' => '/^(?:happy people|testimonials|recent testimonials|reviews)$/i', 'newsletter' => '/newsletter/i', 'contact' => '/^(?:contact us|write us a message|get in touch|stay connected with us for any reason)$/i', 'footer' => '/^quick links$/i'] as $role => $pattern) {
+        foreach (['about-author' => '/^(?:about(?: the author| us)?|meet (?:the author|our team))$/i', 'books' => '/^(?:books(?: i.ve written)?|publications|my book|our books)$/iu', 'blogs' => '/^(?:blogs?|latest news|articles)$/i', 'testimonials' => '/^(?:happy people|testimonials|recent testimonials|reviews)$/i', 'newsletter' => '/newsletter/i', 'contact' => '/^(?:contact us|write us a message|get in touch|stay connected with us for any reason)$/i', 'faq' => '/^(?:frequently asked questions|faqs?)$/i', 'footer' => '/^quick links$/i'] as $role => $pattern) {
             if (preg_match($pattern, $text)) {
                 return $role;
             }
@@ -336,6 +392,49 @@ class BootstrapLayoutRenderer
                 $sections[] = ['top' => $top, 'role' => $role, 'name' => trim($item['text'])];
             }
         }
+        // Full-width background transitions are region boundaries even when the PSD has no useful section names.
+        $groups = [];
+        $collectGroups = function (array $nodes) use (&$collectGroups, &$groups) {
+            foreach ($nodes as $node) {
+                if (! empty($node['children'])) {
+                    $groups[] = $node;
+                    $collectGroups($node['children']);
+                }
+            }
+        };
+        $collectGroups($document['layers'] ?? []);
+        $edges = [];
+        foreach ($items as $band) {
+            if (! isset($band['shapeStyle']) || $band['width'] < $this->designWidth * .9 || $band['height'] < 150 || $band['height'] > ($document['height'] ?? 800) * .8) {
+                continue;
+            }
+            $start = $band['top'];
+            foreach ($groups as $group) {
+                if (($group['width'] ?? 0) > $this->designWidth * .85 && ($group['top'] ?? 0) < $start && $start - ($group['top'] ?? 0) < 300 && ($group['bottom'] ?? 0) >= $band['bottom']) {
+                    $start = $group['top'];
+                }
+            }
+            $edges[] = $start;
+            $edges[] = $band['bottom'];
+        }
+        sort($edges, SORT_NUMERIC);
+        foreach (array_unique($edges) as $edge) {
+            if ($edge <= $headerEnd + 40 || $edge >= ($document['height'] ?? 800) - 40) {
+                continue;
+            }
+            $matched = false;
+            foreach ($sections as &$known) {
+                if (abs($known['top'] - $edge) < 150) {
+                    if ($known['role'] !== 'banner') {
+                        $known['top'] = $edge;
+                    }$matched = true;
+                    break;
+                }
+            }unset($known);
+            if (! $matched) {
+                $sections[] = ['top' => $edge, 'role' => 'content-'.(count($sections) + 1), 'name' => 'Content'];
+            }
+        }
         usort($sections, fn ($a, $b) => $a['top'] <=> $b['top']);
 
         return $sections;
@@ -353,6 +452,17 @@ class BootstrapLayoutRenderer
         if ($stroke = $this->color($style['strokeColor'] ?? null)) {
             $css .= 'border:'.max(1, (float) ($style['strokeWidth'] ?? 1)).'px solid '.$stroke.';';
         }
+        if (! empty($style['gradient'])) {
+            $effect = $style['gradient'];
+            $stops = [];
+            foreach ($effect['stops'] as $stop) {
+                $position = ! empty($effect['reverse']) ? 1 - $stop['position'] : $stop['position'];
+                $stops[] = ['position' => $position, 'color' => $this->color($stop['color'])];
+            }
+            usort($stops, fn ($a, $b) => $a['position'] <=> $b['position']);
+            $values = implode(',', array_map(fn ($stop) => $stop['color'].' '.round($stop['position'] * 100, 3).'%', $stops));
+            $css .= 'background-image:'.(($effect['type'] ?? 'linear') === 'radial' ? 'radial-gradient(ellipse at center,'.$values.')' : 'linear-gradient('.(90 - ($effect['angle'] ?? 0)).'deg,'.$values.')').';';
+        }
         if (isset($style['radius'])) {
             $css .= 'border-radius:calc('.(float) $style['radius'].' * var(--psd-unit));';
         }
@@ -363,6 +473,33 @@ class BootstrapLayoutRenderer
     private function content(array $item, string $role, bool $inArtwork = false): string
     {
         $kind = $item['kind'] ?? 'text';
+        if ($kind === 'icon') {
+            $html = '<span class="source-icon" aria-hidden="true" style="'.$this->shapeCss($item).'width:calc('.$item['width'].' * var(--psd-unit));height:calc('.$item['height'].' * var(--psd-unit));">';
+            foreach ($item['children'] as $child) {
+                $html .= '<img src="'.$this->escape($child['imagePath']).'" alt="" style="position:absolute;left:'.(100 * ($child['left'] - $item['left']) / $item['width']).'%;top:'.(100 * ($child['top'] - $item['top']) / $item['height']).'%;width:'.(100 * $child['width'] / $item['width']).'%;height:'.(100 * $child['height'] / $item['height']).'%;">';
+            }
+
+            return $html.'</span>';
+        }
+        if ($kind === 'countdown') {
+            $numbers = array_values(array_filter($item['children'], fn ($child) => isset($child['text']) && preg_match('/^\d{1,3}$/', trim($child['text']))));
+            usort($numbers, fn ($a, $b) => $a['left'] <=> $b['left']);
+            $html = '<div class="countdown d-flex justify-content-center gap-3">';
+            foreach ($numbers as $index => $number) {
+                $labels = array_values(array_filter($item['children'], fn ($label) => isset($label['text']) && preg_match('/^(days?|hours?|mins?|minutes?|secs?|seconds?)$/i', trim($label['text']))));
+                usort($labels, fn ($a, $b) => abs($a['left'] - $number['left']) <=> abs($b['left'] - $number['left']));
+                if ($index) {
+                    $html .= '<span class="countdown-separator" aria-hidden="true">:</span>';
+                }
+                $html .= '<div class="countdown-unit"><div class="countdown-value" style="'.$this->textStyle($number['textStyle'] ?? []).'">'.$this->escape($number['text']).'</div>';
+                if ($labels) {
+                    $html .= '<small>'.$this->escape($labels[0]['text']).'</small>';
+                }
+                $html .= '</div>';
+            }
+
+            return $html.'</div>';
+        }
         if ($kind === 'figure') {
             $class = 'artwork-'.++$this->serial;
             $this->styles[] = '.'.$class.'{aspect-ratio:'.$item['width'].'/'.$item['height'].';max-width:calc('.$item['width'].' * var(--psd-unit))}';
@@ -378,7 +515,10 @@ class BootstrapLayoutRenderer
             return $html.'</figure>';
         }
         if ($kind === 'card') {
-            return '<div class="content-card '.($this->hasControl($item['children']) ? 'contact-form' : 'testimonial-card').'" style="'.$this->shapeCss($item).'">'.$this->flow($item['children'], $role).'</div>';
+            $children = $this->figures($item['children']);
+            $hasFigure = (bool) array_filter($children, fn ($child) => ($child['kind'] ?? '') === 'figure');
+
+            return '<div class="content-card '.($this->hasControl($children) ? 'contact-form' : ($hasFigure ? 'service-card' : 'testimonial-card')).'" style="'.$this->shapeCss($item).'">'.($hasFigure ? $this->columns($children, $role) : $this->flow($children, $role)).'</div>';
         }
         if ($kind === 'control') {
             $name = $item['field'];
@@ -400,7 +540,7 @@ class BootstrapLayoutRenderer
         if ($kind === 'button') {
             $submit = (bool) preg_match('/submit|send|book an appointment/i', $item['text']);
 
-            return '<button type="'.($submit ? 'submit' : 'button').'" class="btn btn-web" style="'.$this->shapeCss($item).$this->textStyle($item['textStyle'] ?? []).'line-height:1.2;min-width:calc('.min(260, $item['width']).' * var(--psd-unit));min-height:calc('.max(44, $item['height']).' * var(--psd-unit));">'.$this->richText($item).'</button>';
+            return '<button type="'.($submit ? 'submit' : 'button').'" class="btn btn-web" style="'.$this->shapeCss($item).$this->textStyle($item['textStyle'] ?? []).'line-height:1.2;min-width:calc('.min(260, $item['width']).' * var(--psd-unit));min-height:calc('.max(44, $item['height']).' * var(--psd-unit));">'.'<span class="button-label">'.$this->richText($item).'</span>'.(! empty($item['buttonIcon']) ? '<img class="button-icon" src="'.$this->escape($item['buttonIcon']).'" alt="">' : '').'</button>';
         }
         if (isset($item['faqAnswer'])) {
             return '<details class="accordion-item" open><summary>'.$this->escape($item['faqQuestion']).'</summary><p>'.$this->escape($item['faqAnswer']).'</p></details>';
@@ -409,7 +549,7 @@ class BootstrapLayoutRenderer
             $size = $this->fontSize($item);
             $text = trim($item['text']);
             $tag = 'p';
-            if (! $inArtwork && ! $this->mainHeadingUsed && $role === $this->primaryRole && $size >= 28 && mb_strlen($text) > 8) {
+            if (! $this->mainHeadingUsed && (($item['_id'] ?? null) === $this->mainHeadingId) && $this->mainHeadingId !== null) {
                 $tag = 'h1';
                 $this->mainHeadingUsed = true;
             } elseif ($size >= 42) {
@@ -423,6 +563,9 @@ class BootstrapLayoutRenderer
             }
             $style = $this->textStyle($item['textStyle'] ?? []);
             $alignment = $item['textStyle']['justification'] ?? 'left';
+            if (! $inArtwork && abs(($item['left'] + $item['right']) / 2 - $this->designWidth / 2) < $this->designWidth * .06) {
+                $alignment = 'center';
+            }
             if (in_array($alignment, ['left', 'center', 'right', 'justify'])) {
                 $style .= 'text-align:'.$alignment.';';
             }
@@ -468,11 +611,31 @@ class BootstrapLayoutRenderer
         usort($items, fn ($a, $b) => ($a['top'] <=> $b['top']) ?: ($a['left'] <=> $b['left']));
         $html = '';
         $pending = [];
+        $icons = [];
         foreach ($items as $item) {
             if (isset($item['shapeStyle']) && empty($item['kind'])) {
                 continue;
             }
             $kind = $item['kind'] ?? '';
+            $smallIcon = $kind === 'icon' || (! isset($item['text']) && ! $kind && ! empty($item['imagePath']) && $item['width'] <= 90 && $item['height'] <= 90);
+            if (count($icons) === 1 && isset($item['text']) && empty($item['kind']) && $item['left'] >= $icons[0]['right'] - 8 && $item['left'] < $icons[0]['right'] + 120 && abs($item['top'] - $icons[0]['top']) < 100) {
+                $html .= '<div class="contact-detail d-flex align-items-start gap-3">'.$this->content($icons[0], $role).'<div>'.$this->content($item, $role).'</div></div>';
+                $icons = [];
+
+                continue;
+            }
+            if ($icons && (! $smallIcon || abs($icons[0]['top'] - $item['top']) > 20)) {
+                $html .= '<div class="d-flex align-items-center gap-2 icon-row">';
+                foreach ($icons as $icon) {
+                    $html .= $this->content($icon, $role);
+                }$html .= '</div>';
+                $icons = [];
+            }
+            if ($smallIcon) {
+                $icons[] = $item;
+
+                continue;
+            }
             if ($kind === 'control' || $kind === 'button') {
                 $pending[] = $item;
 
@@ -486,6 +649,12 @@ class BootstrapLayoutRenderer
         }
         if ($pending) {
             $html .= $this->controlRows($pending, $role);
+        }
+        if ($icons) {
+            $html .= '<div class="d-flex align-items-center gap-2 icon-row">';
+            foreach ($icons as $icon) {
+                $html .= $this->content($icon, $role);
+            }$html .= '</div>';
         }
 
         return $html;
@@ -504,8 +673,11 @@ class BootstrapLayoutRenderer
         }
         $html = '';
         foreach ($rows as $row) {
+            usort($row, fn ($a, $b) => $a['left'] <=> $b['left']);
             if (count(array_filter($row, fn ($item) => ($item['kind'] ?? '') === 'button')) === count($row)) {
-                $html .= '<div class="d-flex flex-wrap gap-3 control-row">';
+                $bounds = $this->bounds($row);
+                $centered = abs(($bounds['left'] + $bounds['right']) / 2 - $this->designWidth / 2) < $this->designWidth * .1;
+                $html .= '<div class="d-flex flex-wrap gap-3 control-row '.($centered ? 'justify-content-center' : '').'">';
                 foreach ($row as $item) {
                     $html .= $this->content($item, $role);
                 }
@@ -575,7 +747,7 @@ class BootstrapLayoutRenderer
         $width = $this->designWidth;
         $height = max(1, (float) ($document['height'] ?? 800));
         $this->styles = [':root{--psd-unit:min(calc(100vw / '.$width.'),1px);--design-width:'.$width.'px}',
-            '*{box-sizing:border-box}body{margin:0;background:#fff;color:#212529;font-family:Georgia,serif}.container{max-width:calc('.round($width * .8).' * var(--psd-unit));width:calc(100% - 40px)}main{overflow:hidden}section{padding:calc(60 * var(--psd-unit)) 0}h1,h2,h3,h4,h5,h6,p,figure{margin:0}h1,h2,h3,h4,h5,h6,p{white-space:normal;overflow-wrap:normal}.content-block+.content-block{margin-top:calc(22 * var(--psd-unit))}.content-image{max-width:100%;height:auto}.btn-web{border:1px solid currentColor;border-radius:0;min-height:44px;padding:12px 26px;max-width:100%}.control-row{margin-top:18px}.form-control{border-radius:0;min-height:48px;border:1px solid #777;padding:14px 18px;font-family:inherit;font-size:16px}.form-control::placeholder{color:var(--placeholder,#666);opacity:1}.content-card{padding:calc(40 * var(--psd-unit));height:100%}.artwork{position:relative;width:100%;margin-inline:auto}.artwork-layer{position:absolute;pointer-events:none}.artwork-image{display:block;width:100%;height:100%;object-fit:fill}.artwork-caption{width:100%;height:100%;white-space:nowrap;transform-origin:center top}.section-heading{text-align:center;margin-bottom:calc(45 * var(--psd-unit))}.section-heading h2{display:inline-block}.site-header{padding:24px 0}.brand-image{display:block;max-width:calc(505 * var(--psd-unit));max-height:110px;width:100%;object-fit:contain;margin:auto}.site-nav{display:flex;justify-content:center;flex-wrap:wrap;gap:18px 32px;margin-top:24px}.site-nav a{color:inherit;text-decoration:none}.banner{padding-top:calc(75 * var(--psd-unit));padding-bottom:calc(100 * var(--psd-unit))}.signature-lettering{display:block;max-width:100%;height:auto}.export-form-status{background:white;color:#222;padding:1rem}.newsletter .container{max-width:1100px}.newsletter .row{justify-content:center}.footer .content-text{line-height:1.6!important}'];
+            '*{box-sizing:border-box}body{margin:0;background:#fff;color:#212529;font-family:Georgia,serif}.container{max-width:calc('.round($width * .8).' * var(--psd-unit));width:calc(100% - 40px)}main{overflow:hidden}section{padding:calc(60 * var(--psd-unit)) 0}h1,h2,h3,h4,h5,h6,p,figure{margin:0}h1,h2,h3,h4,h5,h6,p{white-space:normal;overflow-wrap:normal}.content-text{transform-origin:left top}.content-block+.content-block{margin-top:calc(22 * var(--psd-unit))}.content-image{max-width:100%;height:auto}.btn-web{border:1px solid currentColor;border-radius:0;min-height:44px;padding:12px 26px;max-width:100%}.control-row{margin-top:18px}.form-control{border-radius:0;min-height:48px;border:1px solid #777;padding:14px 18px;font-family:inherit;font-size:16px}.form-control::placeholder{color:var(--placeholder,#666);opacity:1}.content-card{padding:calc(40 * var(--psd-unit));height:100%}.artwork{position:relative;width:100%;margin-inline:auto}.artwork-layer{position:absolute;pointer-events:none}.artwork-image{display:block;width:100%;height:100%;object-fit:fill}.artwork-caption{width:100%;height:100%;white-space:nowrap;transform-origin:center top}.section-heading{text-align:center;margin-bottom:calc(45 * var(--psd-unit))}.section-heading h2{display:inline-block}.site-header{padding:24px 0}.brand-image{display:block;max-width:calc(505 * var(--psd-unit));max-height:110px;width:100%;object-fit:contain;margin:auto}.site-nav{display:flex;justify-content:center;flex-wrap:wrap;gap:18px 32px;margin-top:24px}.site-nav a{color:inherit;text-decoration:none}.banner{padding-top:calc(75 * var(--psd-unit));padding-bottom:calc(100 * var(--psd-unit))}.signature-lettering{display:block;max-width:100%;height:auto}.export-form-status{background:white;color:#222;padding:1rem}.newsletter .container{max-width:1100px}.newsletter .row{justify-content:center}.footer .content-text{line-height:1.6!important}'];
         $items = $this->leaves($document['layers'] ?? []);
         foreach ($items as $id => &$item) {
             $item['_id'] = $id;
@@ -594,12 +766,22 @@ class BootstrapLayoutRenderer
         }
         $baseText = array_values(array_filter($items, fn ($item) => isset($item['text']) && $this->fontSize($item) >= 14));
         if ($baseText) {
+            $bodyFamily = PsdFontAssets::family($baseText[0]['textStyle']['fontName'] ?? $baseText[0]['textStyle']['font']['name'] ?? 'Arial');
+            $bodyFamily = preg_replace('/[^a-zA-Z0-9 -]/', '', $bodyFamily);
+            $this->styles[] = 'body{font-family:"'.$bodyFamily.'",'.(preg_match('/garamond|baskerville|playfair|cinzel/i', $bodyFamily) ? 'Georgia,serif' : 'Arial,sans-serif').'}';
             $base = $baseText[0]['textStyle']['fillColor'] ?? null;
             if ($base) {
                 $this->styles[] = 'body{color:'.$this->color($base).'}';
             }
         }
+        $headlineCandidates = array_values(array_filter($items, fn ($item) => isset($item['text']) && mb_strlen(trim($item['text'])) >= 5 && mb_strlen(trim($item['text'])) <= 160 && $item['top'] < $height * .35 && $this->fontSize($item) >= 28));
+        $leftCandidates = array_values(array_filter($headlineCandidates, fn ($item) => $item['left'] < $width * .45));
+        $headlineCandidates = $leftCandidates ?: $headlineCandidates;
+        usort($headlineCandidates, fn ($a, $b) => ($this->fontSize($b) <=> $this->fontSize($a)) ?: ($a['top'] <=> $b['top']));
+        $this->mainHeadingId = $headlineCandidates[0]['_id'] ?? null;
         $items = $this->controls($items);
+        $items = $this->icons($items);
+        $items = $this->cards($items);
         $items = $this->figures($items);
         $headerEnd = 0;
         $header = '';
@@ -610,19 +792,30 @@ class BootstrapLayoutRenderer
             }
         }
         if ($nav) {
-            $headerEnd = max(180, $nav['bottom'] + 35);
-            $logos = array_values(array_filter($items, fn ($item) => ! isset($item['text']) && ! empty($item['imagePath']) && $item['top'] < 100 && $item['width'] > 200 && $item['height'] < 150));
-            $header = '<header class="site-header"><div class="container"><div class="row"><div class="col-lg-12 col-md-12 col-12">';
+            $headerEnd = max(60, $nav['bottom'] + 30);
+            $logos = array_values(array_filter($items, fn ($item) => ! isset($item['text']) && ! empty($item['imagePath']) && ! isset($item['shapeStyle']) && preg_match('/lo[\s_-]*go|brand|vector smart object/i', $item['name'] ?? '') && $item['top'] < 150 && $item['width'] < $width * .6 && $item['height'] < 150));
+            $inlineBrand = $logos && $logos[0]['width'] < 200;
+            $header = '<header class="site-header '.($inlineBrand ? 'inline-header' : '').'"><div class="container"><div class="row"><div class="col-lg-12 col-md-12 col-12 '.($inlineBrand ? 'header-inline' : '').'">';
             if ($logos) {
-                $header .= '<img class="brand-image" src="'.$this->escape($logos[0]['imagePath']).'" alt="Website logo">';
+                $header .= '<img class="brand-image" src="'.$this->escape($logos[0]['imagePath']).'" alt="Website logo" style="max-width:calc('.$logos[0]['width'].' * var(--psd-unit));max-height:calc('.$logos[0]['height'].' * var(--psd-unit));">';
             }
             $header .= '<nav class="site-nav" aria-label="Main navigation" style="'.$this->textStyle($nav['textStyle'] ?? []).'">';
             foreach (preg_split('/\s{3,}|\t+/u', trim($nav['text'])) as $label) {
                 $target = $this->role($label) ?? (preg_match('/about/i', $label) ? 'about-author' : (preg_match('/contact/i', $label) ? 'contact' : 'banner'));
                 $header .= '<a href="#'.$target.'">'.$this->escape(trim($label)).'</a>';
             }
-            $header .= '</nav></div></div></div></header>';
-            $items = array_values(array_filter($items, fn ($item) => $item['top'] >= $headerEnd));
+            $header .= '</nav>';
+            if ($inlineBrand) {
+                $header .= '<div class="header-contact">';
+                foreach ($items as $headerItem) {
+                    if (isset($headerItem['text']) && $headerItem['top'] < $headerEnd && $this->fontSize($headerItem) < 25 && (preg_match('/call/i', $headerItem['text']) || preg_match('/^[0-9() +\-]{7,}$/', trim($headerItem['text'])))) {
+                        $header .= '<span style="'.$this->textStyle($headerItem['textStyle'] ?? []).'">'.$this->escape($headerItem['text']).'</span> ';
+                    }
+                }
+                $header .= '</div>';
+            }
+            $header .= '</div></div></div></header>';
+            $items = array_values(array_filter($items, fn ($item) => $item['top'] >= $headerEnd || (isset($item['shapeStyle']) && $item['width'] > $width * .9 && $item['bottom'] > $headerEnd)));
         }
         $sections = $this->sections($document, $items, $headerEnd);
         $this->primaryRole = $sections[0]['role'] ?? 'banner';
@@ -630,8 +823,8 @@ class BootstrapLayoutRenderer
         foreach ($sections as $index => $section) {
             $bottom = $sections[$index + 1]['top'] ?? $height;
             $role = $section['role'];
-            $members = array_values(array_filter($items, fn ($item) => $item['top'] >= $section['top'] && $item['top'] < $bottom));
-            $bands = array_values(array_filter($members, fn ($item) => isset($item['shapeStyle']) && $item['width'] > $width * .6 && $item['height'] > 200));
+            $members = array_values(array_filter($items, fn ($item) => (($item['top'] >= $section['top']) || ($index === 0 && $item['bottom'] > $section['top'])) && $item['top'] < $bottom));
+            $bands = array_values(array_filter($items, fn ($item) => isset($item['shapeStyle']) && $item['width'] > $width * .6 && $item['height'] > 200 && $item['top'] <= $section['top'] + 150 && $item['bottom'] > $section['top']));
             $style = '';
             if ($bands) {
                 $style = $this->shapeCss($bands[0]);
@@ -653,6 +846,9 @@ class BootstrapLayoutRenderer
             }
 
             $members = array_values(array_filter($members, fn ($item) => ! in_array($item, $bands, true)));
+            if (! $members) {
+                continue;
+            }
             $heading = null;
             foreach ($members as $key => $item) {
                 if (isset($item['text']) && $this->role($item['text']) === $role && abs(($item['left'] + $item['width'] / 2) - $width / 2) < $width * .1) {
@@ -667,7 +863,10 @@ class BootstrapLayoutRenderer
             }
             $members = $this->cards(array_values($members));
             $hasForm = $this->hasControl($members);
-            $body .= '<section id="'.$role.'" class="'.$role.'" style="'.$style.'"><div class="container">';
+            $visualMembers = array_values(array_filter($members, fn ($member) => isset($member['text']) || isset($member['kind']) || empty($member['shapeStyle'])));
+            $bounds = $visualMembers ? $this->bounds($visualMembers) : null;
+            $wide = $bounds && $bounds['width'] > $width * .9;
+            $body .= '<section id="'.$role.'" class="'.$role.'" style="'.$style.'"><div class="container'.($wide ? ' container-wide' : '').'">';
             if ($heading) {
                 $body .= '<div class="row"><div class="col-lg-12 col-md-12 col-12"><div class="section-heading">'.$this->content($heading, $role).'</div></div></div>';
             }
@@ -687,13 +886,21 @@ class BootstrapLayoutRenderer
             $this->styles[] = '.text-fit-'.$scale.'{transform:scaleX('.($scale / 100).')}';
         }
 
+        $this->styles[] = '.countdown{margin:24px 0}.countdown-unit{text-align:center}.countdown-value{border:1px solid #b9c3cc;border-radius:5px;padding:8px 12px;min-width:56px}.countdown-unit small{display:block;margin-top:6px}.countdown-separator{padding-top:14px}.icon-row{margin:16px 0}.icon-row img{max-width:calc(52 * var(--psd-unit));height:auto}.service-card{padding:calc(30 * var(--psd-unit));overflow:hidden}.service-card .content-card{padding:0}';
+
+        $this->styles[] = '.header-inline{display:flex;align-items:center;gap:24px}.header-inline .brand-image{margin:0;flex:none}.header-inline .site-nav{flex:1;margin:0;gap:12px 24px}.header-contact{white-space:nowrap}.inline-header{padding:calc(12 * var(--psd-unit)) 0}@media(max-width:767.98px){.header-inline{flex-wrap:wrap}.header-inline .site-nav{flex-basis:100%;order:3}.header-contact{margin-left:auto}}';
+        $this->styles[] = '.btn-web{display:inline-flex;align-items:center;justify-content:center;gap:14px}.button-icon{width:24px;height:auto}';
+        $this->styles[] = '.container.container-wide{max-width:var(--design-width);width:calc(100% - 24px)}';
+
+        $this->styles[] = '.source-icon{display:inline-block;position:relative;flex-shrink:0;overflow:hidden}.contact-detail{margin-top:18px}.source-icon img{max-width:none}';
+
         return $this->package($body, 'Generated semantic Bootstrap sections and responsive content columns. Local font files are included where available; custom signature lettering uses its saved PSD artwork. Compare with reference.html.');
     }
 
     private function package(string $body, string $message): array
     {
         $html = '<!DOCTYPE html>'."\n".'<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Converted PSD website</title><link rel="stylesheet" href="assets/css/bootstrap.min.css"><link rel="stylesheet" href="assets/css/style.css"></head><body>'.$body.'<script src="assets/js/bootstrap.bundle.min.js"></script><script src="assets/js/main.js"></script></body></html>';
-        $js = "document.fonts.ready.then(()=>document.querySelectorAll('.artwork-caption').forEach(node=>{if(node.scrollWidth>node.clientWidth&&node.clientWidth>0)node.classList.add('text-fit-'+Math.max(60,Math.floor(100*node.clientWidth/node.scrollWidth/5)*5))}));document.querySelectorAll('[data-export-form]').forEach(form=>form.addEventListener('submit',event=>{event.preventDefault();if(!form.reportValidity())return;let status=form.querySelector('[role=status]');if(!status){status=document.createElement('p');status.setAttribute('role','status');status.className='export-form-status';form.append(status)}status.textContent='This exported form needs a submission endpoint before messages can be sent.';}));";
+        $js = "document.fonts.ready.then(()=>document.querySelectorAll('.artwork-caption,h1.content-text,h2.content-text,h3.content-text,h4.content-text').forEach(node=>{if(node.scrollWidth>node.clientWidth&&node.clientWidth>0)node.classList.add('text-fit-'+Math.max(60,Math.floor(100*node.clientWidth/node.scrollWidth/5)*5))}));document.querySelectorAll('[data-export-form]').forEach(form=>form.addEventListener('submit',event=>{event.preventDefault();if(!form.reportValidity())return;let status=form.querySelector('[role=status]');if(!status){status=document.createElement('p');status.setAttribute('role','status');status.className='export-form-status';form.append(status)}status.textContent='This exported form needs a submission endpoint before messages can be sent.';}));";
 
         return ['html' => $html, 'css' => implode("\n", $this->styles), 'js' => $js, 'message' => $message];
     }

@@ -91,4 +91,38 @@ class BootstrapExportTest extends TestCase
         $this->assertStringContainsString('rgb(0,109,233)', $result['css']);
         $this->assertStringContainsString('export-style-', $result['html']);
     }
+
+    public function test_contact_information_is_not_mistaken_for_form_labels(): void
+    {
+        $layers = [];
+        foreach (["Phone\nLandline: 123-456-789", "Email\nContact@domain.com"] as $i => $value) {
+            $layers[] = ['type' => 'text', 'name' => 'Contact detail', 'text' => $value, 'left' => 800, 'top' => 500 + $i * 100, 'width' => 300, 'height' => 70, 'textStyle' => ['fontSize' => 18]];
+        }
+        $result = app(PsdWebsiteGenerator::class)->render(['width' => 1200, 'height' => 1000, 'layers' => $layers]);
+        $this->assertStringNotContainsString('<input', $result['html']);
+        $this->assertStringContainsString('Contact@domain.com', $result['html']);
+    }
+
+    public function test_later_black_cta_does_not_turn_the_hero_black(): void
+    {
+        $result = app(PsdWebsiteGenerator::class)->render(['width' => 1200, 'height' => 2400, 'layers' => [
+            ['type' => 'image', 'name' => 'Rectangle hero', 'left' => 0, 'top' => 0, 'right' => 1200, 'bottom' => 800, 'width' => 1200, 'height' => 800, 'shapeStyle' => ['fillColor' => ['r' => 250, 'g' => 250, 'b' => 250]]],
+            ['type' => 'text', 'name' => 'Heading', 'text' => 'Main headline', 'left' => 200, 'top' => 100, 'right' => 1000, 'bottom' => 180, 'width' => 800, 'height' => 80, 'textStyle' => ['fontSize' => 60]],
+            ['type' => 'image', 'name' => 'Rectangle CTA', 'left' => 0, 'top' => 1200, 'right' => 1200, 'bottom' => 1500, 'width' => 1200, 'height' => 300, 'shapeStyle' => ['fillColor' => ['r' => 0, 'g' => 0, 'b' => 0]]],
+            ['type' => 'text', 'name' => 'CTA', 'text' => 'Call our team', 'left' => 200, 'top' => 1300, 'right' => 1000, 'bottom' => 1350, 'width' => 800, 'height' => 50, 'textStyle' => ['fontSize' => 32]],
+        ]]);
+        preg_match('/<section id="banner"[^>]*class="([^"]+)"/', $result['html'], $match);
+        $classes = explode(' ', $match[1]);
+        $styleClass = end($classes);
+        preg_match('/\.'.preg_quote($styleClass, '/').'\{([^}]+)\}/', $result['css'], $rule);
+        $this->assertStringContainsString('rgb(250,250,250)', $rule[1]);
+        $this->assertStringContainsString('Main headline', $result['html']);
+    }
+
+    public function test_button_style_runs_share_a_single_label_box(): void
+    {
+        $result = app(PsdWebsiteGenerator::class)->render(['width' => 800, 'height' => 600, 'layers' => [['type' => 'text', 'name' => 'Action', 'text' => 'Learn More', 'left' => 50, 'top' => 100, 'width' => 180, 'height' => 40, 'textStyle' => ['fontSize' => 18, 'styleRuns' => [['length' => 1, 'style' => ['fontSize' => 18]], ['length' => 9, 'style' => ['fontSize' => 18]]]]]]]);
+        $this->assertStringContainsString('class="button-label"', $result['html']);
+        $this->assertDoesNotMatchRegularExpression('/\sstyle\s*=|<style\b/i', $result['html']);
+    }
 }

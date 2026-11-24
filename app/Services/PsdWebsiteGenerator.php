@@ -127,6 +127,9 @@ PROMPT;
         preg_match_all('/(?:placeholder|aria-label|value)=["\']([^"\']*)["\']/', $html, $attributes);
         $copy = $normalize(strip_tags($html).implode(' ', $attributes[1] ?? []));
         foreach ($layers as $layer) {
+            if (! empty($layer['occluded'])) {
+                continue;
+            }
             if (! empty($layer['text']) && ! str_contains($copy, $normalize($layer['text']))) {
                 throw new \RuntimeException('PSD text omitted');
             }

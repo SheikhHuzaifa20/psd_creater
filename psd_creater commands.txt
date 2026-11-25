@@ -1,0 +1,42 @@
+# Versions check karo; ye sab commands chalni chahiye.
+git --version
+php --version
+composer --version
+node --version
+npm --version
+
+# Project clone karo.
+Set-Location "C:\laragon\www"
+git clone APNE_REPO_KA_URL psd_creater
+Set-Location "C:\laragon\www\psd_creater"
+
+# Environment file aur dependencies.
+Copy-Item .env.example .env
+composer install
+npm ci
+
+# Database file banao.
+if (!(Test-Path database\database.sqlite)) {
+    New-Item -ItemType File database\database.sqlite | Out-Null
+}
+
+# Temporary storage banao.
+New-Item -ItemType Directory -Force storage\app\temp | Out-Null
+
+# Laravel setup.
+php artisan key:generate
+php artisan migrate --force
+npm run build
+
+# Environment settings kholo.
+notepad .env
+
+# .env save karne ke baad ye commands chalao.
+php artisan optimize:clear
+php artisan psd:doctor
+
+# Website start karo; terminal khula rehne do.
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\start-converter.ps1 -Standalone -Port 8000"
+
+# Browser mein kholo:
+# http://127.0.0.1:8000
